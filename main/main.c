@@ -34,7 +34,9 @@ static const char *TAG = "plantWater";
 //GPIO Definitions
 #define GPIO_RELAY_1 32
 #define GPIO_RELAY_2 33
+#define GPIO_SENSOR_1 25
 #define GPIO_OUTPUT_PIN_SEL ((1ULL << GPIO_RELAY_1)) | ((1ULL<<GPIO_RELAY_2))
+#define GPIO_SENSOR_PIN_SEL (1ULL << GPIO_SENSOR_1)
 #define ESP_INTR_FLAG_DEFAULT 0
 
 #define DEFAULT_VREF 1100
@@ -77,12 +79,19 @@ void init_adc();
 static void init_wifi();
 void init_aws_iot();
 uint32_t read_sensor();
-void run_gpio();
+void enable_sensor();
+void disable_sensor();
+bool manage_water_pump(uint32_t value);
+void run_loop();
 void disconnectCallbackHandler(AWS_IoT_Client *pClient, void *data);
 void mqttSubscriptionCallback(AWS_IoT_Client *pClient, char *topicName, uint16_t topicNameLen, IoT_Publish_Message_Params *params, void *pData);
 
 void init_gpio(){
     gpio_config_t io_conf;
+
+    //SETUP RELAY GPIO PINS
+    gpio_set_level(GPIO_RELAY_1, 1);
+    gpio_set_level(GPIO_RELAY_2, 1);
 
     //Disable interrupt
     io_conf.intr_type = GPIO_INTR_DISABLE;
@@ -95,6 +104,14 @@ void init_gpio(){
     //Disable pull up mode
     io_conf.pull_up_en = 0;
     //Configure GPIO pins
+    gpio_config(&io_conf);
+
+    //=================================================
+
+    //SETUP SENSOR GPIO PINS
+    //Select pins
+    io_conf.pin_bit_mask = GPIO_SENSOR_PIN_SEL;
+    //Configure pins
     gpio_config(&io_conf);
 }
 
@@ -123,6 +140,16 @@ uint32_t read_sensor(){
     printf("VOLTAGE: %d\n", voltage);
 
     return voltage;
+}
+
+//Enable plant sensor
+void enable_sensor(){
+    gpio_set_level(GPIO_SENSOR_1, 1);
+}
+
+//Disable plant sensors
+void disable_sensor(){
+    gpio_set_level(GPIO_SENSOR_1, 0);
 }
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void* event_data){
@@ -247,10 +274,10 @@ void init_aws_iot(){
     }
 
     //Create subscription to IoT topic
-    IoT_Error_t subStatus = aws_iot_mqtt_subscribe(&mqttClient, "plantWater", 11, QOS0, mqttSubscriptionCallback, NULL);
+    IoT_Error_t subStatus = aws_iot_mqtt_subscribe(&mqttClient, "plantControl", 13, QOS0, mqttSubscriptionCallback, NULL);
 
     if(subStatus == SUCCESS){
-        ESP_LOGI(TAG, "Successfully subscribed to plantWater topic");
+        ESP_LOGI(TAG, "Successfully subscribed to plantControl topic");
     }else{
         ESP_LOGE(TAG, "Error subscribing to IoT Topic: %d", subStatus);
     }
@@ -286,31 +313,52 @@ void mqttSubscriptionCallback(AWS_IoT_Client *pClient, char *topicName, uint16_t
 }
 
 
+bool manage_water_pump(uint32_t value){
+    const TickType_t pump_time = 5000 / portTICK_PERIOD_MS; //2 s
+    if(value > 2580){
+        gpio_set_level(GPIO_RELAY_1, 0);
+        vTaskDelay(pump_time);
+        gpio_set_level(GPIO_RELAY_1, 1);
+        return true;
+    }
+
+    return false;
+}
+
+
 void run_loop(){
     const TickType_t delay_time = 2000 / portTICK_PERIOD_MS; //2 s
     const char *topic = "plantWater";
+    const uint64_t sleepTime = 900; //Every 15 mins
 
     IoT_Error_t conErr = SUCCESS;
 
+    //Enable sensor
+    enable_sensor();
+    vTaskDelay(delay_time);
+
     while(conErr == NETWORK_ATTEMPTING_RECONNECT || conErr == NETWORK_RECONNECTED || conErr == SUCCESS){
-        conErr = aws_iot_mqtt_yield(&mqttClient, 100);
+        conErr = aws_iot_mqtt_yield(&mqttClient, 200);
         if(conErr == NETWORK_ATTEMPTING_RECONNECT){
             printf("MQTT attempting reconnect\n");
             continue;
         }
-
+        
         //Get sensor value
         uint32_t voltage = read_sensor();
+
+        bool pumpStatus = manage_water_pump(voltage);
         
         //Format message
-        char msg[24];
-        snprintf(msg, 24, "Voltage: %d", voltage);
+        char msg[36];
+        snprintf(msg, 36, "Voltage: %d  Pump: %d", voltage, pumpStatus);
         IoT_Publish_Message_Params pubParams;
         pubParams.qos = QOS0;
         pubParams.payload = (void *) msg;
         pubParams.payloadLen = strlen(msg);
         pubParams.isRetained = 0;
 
+        //Publish message to AWS IoT Core
         conErr = aws_iot_mqtt_publish(&mqttClient, topic, strlen(topic), &pubParams);
 
         if(conErr == MQTT_REQUEST_TIMEOUT_ERROR){
@@ -318,8 +366,15 @@ void run_loop(){
         }else if(conErr != SUCCESS){
             printf("MQTT ERROR(%d)\n", conErr);
         }
-        
+
         vTaskDelay(delay_time);
+        //Disable sensor
+        disable_sensor();
+
+        //Go into sleep mode
+        esp_sleep_enable_timer_wakeup(sleepTime * 1000000);
+        esp_deep_sleep_start();
+        break;
     }
 }
 
@@ -334,7 +389,7 @@ void app_main()
     ESP_ERROR_CHECK(err);
 
     init_wifi();
-    //init_gpio();
+    init_gpio();
     init_adc();
     init_aws_iot();
     run_loop();
