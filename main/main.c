@@ -274,7 +274,7 @@ void init_aws_iot(){
     }
 
     //Create subscription to IoT topic
-    IoT_Error_t subStatus = aws_iot_mqtt_subscribe(&mqttClient, "plantControl", 13, QOS0, mqttSubscriptionCallback, NULL);
+    IoT_Error_t subStatus = aws_iot_mqtt_subscribe(&mqttClient, "plantControl", 13, QOS1, mqttSubscriptionCallback, NULL);
 
     if(subStatus == SUCCESS){
         ESP_LOGI(TAG, "Successfully subscribed to plantControl topic");
@@ -314,8 +314,8 @@ void mqttSubscriptionCallback(AWS_IoT_Client *pClient, char *topicName, uint16_t
 
 
 bool manage_water_pump(uint32_t value){
-    const TickType_t pump_time = 5000 / portTICK_PERIOD_MS; //2 s
-    if(value > 2580){
+    const TickType_t pump_time = 15000 / portTICK_PERIOD_MS; //15 s
+    if(value > 2500){
         gpio_set_level(GPIO_RELAY_1, 0);
         vTaskDelay(pump_time);
         gpio_set_level(GPIO_RELAY_1, 1);
@@ -329,7 +329,7 @@ bool manage_water_pump(uint32_t value){
 void run_loop(){
     const TickType_t delay_time = 2000 / portTICK_PERIOD_MS; //2 s
     const char *topic = "plantWater";
-    const uint64_t sleepTime = 900; //Every 15 mins
+    const uint64_t sleepTime = 4 * 60 * 60; //Every 4 hours #hrs * mins * seconds
 
     IoT_Error_t conErr = SUCCESS;
 
@@ -353,7 +353,7 @@ void run_loop(){
         char msg[36];
         snprintf(msg, 36, "Voltage: %d  Pump: %d", voltage, pumpStatus);
         IoT_Publish_Message_Params pubParams;
-        pubParams.qos = QOS0;
+        pubParams.qos = QOS1;
         pubParams.payload = (void *) msg;
         pubParams.payloadLen = strlen(msg);
         pubParams.isRetained = 0;
@@ -368,11 +368,14 @@ void run_loop(){
         }
 
         vTaskDelay(delay_time);
+
         //Disable sensor
         disable_sensor();
 
         //Go into sleep mode
         esp_sleep_enable_timer_wakeup(sleepTime * 1000000);
+        printf("Going to sleep in a few seconds...\n");
+        vTaskDelay(delay_time);
         esp_deep_sleep_start();
         break;
     }
